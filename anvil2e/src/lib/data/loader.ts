@@ -79,7 +79,7 @@ export function clearDataLoadedFlag() {
 }
 
 /**
- * Load a single pack from JSON file
+ * Load a single pack from directory of JSON files
  */
 async function loadPack(
   packName: PackName,
@@ -88,45 +88,71 @@ async function loadPack(
   const db = getGameDataDB()
   
   try {
-    onProgress?.({
-      pack: packName,
-      loaded: 0,
-      total: 0,
-      status: "loading",
-    })
-    
-    // Fetch pack JSON
-    const response = await fetch(`/data/packs/${packName}.json`)
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ${packName}: ${response.statusText}`)
+    // Fetch manifest to get list of files
+    const manifestResponse = await fetch("/data/manifest.json")
+    if (!manifestResponse.ok) {
+      throw new Error("Failed to fetch manifest - run: node scripts/generate-manifest.js")
     }
     
-    const data = await response.json()
+    const manifest = await manifestResponse.json() as Record<string, string[]>
+    const files = manifest[packName]
     
-    // Handle both array and object formats
-    const docs = Array.isArray(data) ? data : Object.values(data)
-    
-    if (docs.length === 0) {
-      console.warn(`⚠️ Pack ${packName} is empty`)
+    if (!files || files.length === 0) {
+      console.warn(`⚠️ Pack ${packName} has no files in manifest`)
       return 0
     }
     
-    // Transform docs to GameDataDoc format
-    const gameDataDocs: GameDataDoc[] = docs.map((doc: Record<string, unknown>) => {
-      // Determine type from pack name
-      const type = getTypeFromPackName(packName)
-      
-      return {
-        _id: doc._id as string || `${packName}_${(doc.name as string)?.toLowerCase().replace(/\\s+/g, "_")}`,
-        type,
-        name: (doc.name as string) || "Unnamed",
-        system: (doc.system as Record<string, unknown>) || {},
-        img: doc.img as string | undefined,
-        folder: doc.folder as string | undefined,
-        sort: doc.sort as number | undefined,
-        flags: doc.flags as Record<string, unknown> | undefined,
-      }
+    onProgress?.({
+      pack: packName,
+      loaded: 0,
+      total: files.length,
+      status: "loading",
     })
+    
+    // Fetch all files in parallel (in batches to avoid overwhelming browser)
+    const batchSize = 50
+    const gameDataDocs: GameDataDoc[] = []
+    
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize)
+      
+      const batchDocs = await Promise.all(
+        batch.map(async (filename) => {
+          try {
+            const response = await fetch(`/data/packs/${packName}/${filename}`)
+            if (!response.ok) return null
+            
+            const doc = await response.json() as Record<string, unknown>
+            const type = getTypeFromPackName(packName)
+            
+            return {
+              _id: doc._id as string || `${packName}_${filename.replace('.json', '')}`,
+              type,
+              name: (doc.name as string) || "Unnamed",
+              system: (doc.system as Record<string, unknown>) || {},
+              img: doc.img as string | undefined,
+              folder: doc.folder as string | undefined,
+              sort: doc.sort as number | undefined,
+              flags: doc.flags as Record<string, unknown> | undefined,
+            } as GameDataDoc
+          } catch (err) {
+            console.warn(`Failed to load ${filename}:`, err)
+            return null
+          }
+        })
+      )
+      
+      // Filter out nulls and add to collection
+      gameDataDocs.push(...batchDocs.filter((doc): doc is GameDataDoc => doc !== null))
+      
+      // Update progress
+      onProgress?.({
+        pack: packName,
+        loaded: Math.min(i + batchSize, files.length),
+        total: files.length,
+        status: "loading",
+      })
+    }
     
     // Bulk insert (faster than individual puts)
     const result = await db.bulkDocs(gameDataDocs, { new_edits: false })
@@ -141,7 +167,7 @@ async function loadPack(
     onProgress?.({
       pack: packName,
       loaded: successCount,
-      total: docs.length,
+      total: files.length,
       status: "complete",
     })
     

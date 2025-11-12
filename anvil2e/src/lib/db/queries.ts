@@ -27,10 +27,11 @@ export async function getGameDataByType<T extends GameDataDoc>(
   try {
     const result = await db.find({
       selector: { type },
-      sort: ["name"],
     })
     
-    return result.docs as T[]
+    // Sort in JavaScript instead of database
+    const docs = result.docs as T[]
+    return docs.sort((a, b) => a.name.localeCompare(b.name))
   } catch (error) {
     console.error(`Failed to fetch ${type}:`, error)
     throw error
@@ -89,7 +90,6 @@ export async function queryGameData<T extends GameDataDoc>(
       selector,
       limit: query.limit || 100,
       skip: query.skip || 0,
-      sort: query.sort || ["name"],
     })
     
     return result.docs as T[]
@@ -269,7 +269,6 @@ export async function queryCharacters(
       selector,
       limit: query.limit || 100,
       skip: query.skip || 0,
-      sort: query.sort || [{ updatedAt: "desc" }],
     })
     
     return result.docs as CharacterDoc[]
